@@ -54,6 +54,19 @@ defmodule Slack.Bot do
   end
 
   @doc """
+  Send a message to a user who is a member of some channel.
+
+  The `message` can be just the message text, or a `t:map/0` of properties that
+  are accepted by Slack's `chat.postMessage` API endpoint.
+  """
+  @spec dm(String.t(), String.t(), String.t() | map()) :: Macro.t()
+  defmacro dm(channel, user, message) do
+    quote do
+      Slack.MessageServer.dm(__MODULE__, unquote(channel), unquote(user), unquote(message))
+    end
+  end
+
+  @doc """
   Deletes a message from the channel.
 
   The `channel` is the channel ID where the message was sent.

@@ -29,6 +29,10 @@ defmodule Slack.MessageServer do
     GenServer.cast(via_tuple(bot, channel), {:add, message})
   end
 
+  def dm(bot, channel, user, message) when is_binary(channel) do
+    GenServer.cast(via_tuple(bot, channel), {:dm, user, message})
+  end
+
   def delete(bot, channel, ts) when is_binary(channel) do
     GenServer.cast(via_tuple(bot, channel), {:remove, ts})
   end
@@ -49,6 +53,7 @@ defmodule Slack.MessageServer do
       send_queue: :queue.new(),
       delete_queue: :queue.new(),
       send_timer_ref: schedule_next_send(),
+      dm_timer_ref: schedule_next_send(),
       delete_timer_ref: schedule_next_delete()
     }
 
@@ -68,6 +73,24 @@ defmodule Slack.MessageServer do
   def handle_cast({:add, message}, state) do
     Logger.debug("[Slack.MessageServer] Adding message #{inspect(message)}")
     state = %{state | send_queue: :queue.in(message, state.send_queue)}
+    {:noreply, state}
+  end
+
+  # If we are paused, we will add it to the send_queue and start scheduling messages.
+  def handle_cast({:dm, user, message}, %{send_timer_ref: nil} = state) do
+    Logger.debug("[Slack.MessageServer] Adding DM to user #{user} #{inspect(message)}")
+
+    state =
+      send_and_schedule_next(%{state | send_queue: :queue.in({user, message}, state.send_queue)})
+
+    {:noreply, state}
+  end
+
+  # It is not paused, so that means we are still scheduling messages, so we will
+  # just add the message to send_queue.
+  def handle_cast({:dm, user, message}, state) do
+    Logger.debug("[Slack.MessageServer] Adding DM to user #{user} #{inspect(message)}")
+    state = %{state | send_queue: :queue.in({user, message}, state.send_queue)}
     {:noreply, state}
   end
 
@@ -106,6 +129,12 @@ defmodule Slack.MessageServer do
       {:empty, _} ->
         Logger.debug("[Slack.MessageServer] [#{state.channel}] no more messages to send: PAUSED")
         %{state | send_timer_ref: nil}
+
+      {{:value, {user, message}}, rest} ->
+        Logger.debug("[Slack.MessageServer] Sending next DM to user #{user}: #{inspect(message)}")
+        admin_user_token = Application.fetch_env!(:slack_elixir, :admin_user_token)
+        send_message(admin_user_token, user, message)
+        %{state | send_queue: rest, send_timer_ref: schedule_next_send()}
 
       {{:value, message}, rest} ->
         Logger.debug("[Slack.MessageServer] Sending next message: #{inspect(message)}")
