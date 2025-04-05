@@ -5,7 +5,9 @@ defmodule Slack.MessageServer do
   require Logger
 
   # Slack has a rate-limit of 1 message per second per channel.
-  @message_rate_ms :timer.seconds(1)
+  @send_message_rate_ms :timer.seconds(1)
+  # Slack has a rate-limit of ? message deletions per second per channel.
+  @delete_message_rate_ms :timer.seconds(1)
 
   # ----------------------------------------------------------------------------
   # Public API
@@ -27,6 +29,10 @@ defmodule Slack.MessageServer do
     GenServer.cast(via_tuple(bot, channel), {:add, message})
   end
 
+  def delete(bot, channel, ts) when is_binary(channel) do
+    GenServer.cast(via_tuple(bot, channel), {:remove, ts})
+  end
+
   def stop(bot, channel) do
     GenServer.stop(via_tuple(bot, channel))
   end
@@ -40,26 +46,44 @@ defmodule Slack.MessageServer do
     state = %{
       bot: bot,
       channel: channel,
-      queue: :queue.new(),
-      timer_ref: schedule_next()
+      send_queue: :queue.new(),
+      delete_queue: :queue.new(),
+      send_timer_ref: schedule_next_send(),
+      delete_timer_ref: schedule_next_delete()
     }
 
     {:ok, state}
   end
 
   @impl true
-  # If we are paused, we will add it to the queue and start scheduling messages.
-  def handle_cast({:add, message}, %{timer_ref: nil} = state) do
+  # If we are paused, we will add it to the send_queue and start scheduling messages.
+  def handle_cast({:add, message}, %{send_timer_ref: nil} = state) do
     Logger.debug("[Slack.MessageServer] Adding message #{inspect(message)}")
-    state = send_and_schedule_next(%{state | queue: :queue.in(message, state.queue)})
+    state = send_and_schedule_next(%{state | send_queue: :queue.in(message, state.send_queue)})
     {:noreply, state}
   end
 
   # It is not paused, so that means we are still scheduling messages, so we will
-  # just add the message to queue.
+  # just add the message to send_queue.
   def handle_cast({:add, message}, state) do
     Logger.debug("[Slack.MessageServer] Adding message #{inspect(message)}")
-    state = %{state | queue: :queue.in(message, state.queue)}
+    state = %{state | send_queue: :queue.in(message, state.send_queue)}
+    {:noreply, state}
+  end
+
+  @impl true
+  # If we are paused, we will add it to the delete_queue and start scheduling messages.
+  def handle_cast({:remove, ts}, %{delete_timer_ref: nil} = state) do
+    Logger.info("[Slack.MessageServer] Removing message with timestamp #{inspect(ts)}")
+    state = delete_and_schedule_next(%{state | delete_queue: :queue.in(ts, state.delete_queue)})
+    {:noreply, state}
+  end
+
+  # It is not paused, so that means we are still scheduling messages, so we will
+  # just add the message to delete_queue.
+  def handle_cast({:remove, ts}, state) do
+    Logger.info("[Slack.MessageServer] Removing message with timestamp #{inspect(ts)}")
+    state = %{state | delete_queue: :queue.in(ts, state.delete_queue)}
     {:noreply, state}
   end
 
@@ -68,20 +92,42 @@ defmodule Slack.MessageServer do
     {:noreply, send_and_schedule_next(state)}
   end
 
+  @impl true
+  def handle_info(:delete, state) do
+    {:noreply, delete_and_schedule_next(state)}
+  end
+
   # ----------------------------------------------------------------------------
   # Private API
   # ----------------------------------------------------------------------------
 
   defp send_and_schedule_next(state) do
-    case :queue.out(state.queue) do
+    case :queue.out(state.send_queue) do
       {:empty, _} ->
         Logger.debug("[Slack.MessageServer] [#{state.channel}] no more messages to send: PAUSED")
-        %{state | timer_ref: nil}
+        %{state | send_timer_ref: nil}
 
       {{:value, message}, rest} ->
         Logger.debug("[Slack.MessageServer] Sending next message: #{inspect(message)}")
         send_message(state.bot.token, state.channel, message)
-        %{state | queue: rest, timer_ref: schedule_next()}
+        %{state | send_queue: rest, send_timer_ref: schedule_next_send()}
+    end
+  end
+
+  defp delete_and_schedule_next(state) do
+    case :queue.out(state.delete_queue) do
+      {:empty, _} ->
+        Logger.debug(
+          "[Slack.MessageServer] [#{state.channel}] no more messages to delete: PAUSED"
+        )
+
+        %{state | delete_timer_ref: nil}
+
+      {{:value, ts}, rest} ->
+        Logger.debug("[Slack.MessageServer] Removing next message with timestamp: #{inspect(ts)}")
+        admin_user_token = Application.fetch_env!(:slack_elixir, :admin_user_token)
+        delete_message(admin_user_token, state.channel, ts)
+        %{state | delete_queue: rest, delete_timer_ref: schedule_next_delete()}
     end
   end
 
@@ -107,8 +153,24 @@ defmodule Slack.MessageServer do
     end
   end
 
-  defp schedule_next(after_ms \\ @message_rate_ms) do
+  defp delete_message(token, channel, ts) do
+    args = %{channel: channel, ts: ts}
+
+    case Slack.API.post("chat.delete", token, args) do
+      {:ok, _} ->
+        Logger.debug("[Slack.MessageServer] DELETED: #{inspect(args)}")
+
+      {:error, error} ->
+        Logger.error("[Slack.MessageServer] error deleting message #{inspect(error)}")
+    end
+  end
+
+  defp schedule_next_send(after_ms \\ @send_message_rate_ms) do
     Process.send_after(self(), :send, after_ms)
+  end
+
+  defp schedule_next_delete(after_ms \\ @delete_message_rate_ms) do
+    Process.send_after(self(), :delete, after_ms)
   end
 
   defp via_tuple(%Slack.Bot{module: bot}, channel) do

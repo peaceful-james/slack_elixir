@@ -126,6 +126,8 @@ config :my_app, MyApp.SlackBot,
   app_token: "MY_SLACK_APP_TOKEN",
   bot_token: "MY_SLACK_BOT_TOKEN",
   bot: MyApp.SlackBot,
+
+config :slack_elixir, admin_user_token: "MY_SLACK_ADMIN_USER_TOKEN",
   # Add this if you want to customize the channel types to join.
   # By default we join all channel types: public_channel, private_channel, im, mpim.
   channels: [

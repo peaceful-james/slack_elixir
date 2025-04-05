@@ -52,4 +52,17 @@ defmodule Slack.Bot do
       Slack.MessageServer.send(__MODULE__, unquote(channel), unquote(message))
     end
   end
+
+  @doc """
+  Deletes a message from the channel.
+
+  The `channel` is the channel ID where the message was sent.
+  The `ts` is the timestamp of the message to be deleted.
+  """
+  @spec delete_message(String.t(), String.t()) :: Macro.t()
+  defmacro delete_message(channel, ts) do
+    quote do
+      Slack.MessageServer.delete(__MODULE__, unquote(channel), unquote(ts))
+    end
+  end
 end
