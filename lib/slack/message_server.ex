@@ -132,8 +132,7 @@ defmodule Slack.MessageServer do
 
       {{:value, {user, message}}, rest} ->
         Logger.debug("[Slack.MessageServer] Sending next DM to user #{user}: #{inspect(message)}")
-        admin_user_token = Application.fetch_env!(:slack_elixir, :admin_user_token)
-        send_message(admin_user_token, user, message)
+        send_message(state.bot.token, user, message)
         %{state | send_queue: rest, send_timer_ref: schedule_next_send()}
 
       {{:value, message}, rest} ->
